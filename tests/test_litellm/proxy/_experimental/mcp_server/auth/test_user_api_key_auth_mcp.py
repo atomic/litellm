@@ -7042,31 +7042,38 @@ class TestAdmittedSubjectPerTeamOrgCap:
         # (not in org-a's allowlist) is capped out — same per-team org cap, config server included.
         assert set(result) == {"cfg-oauth-1"}
 
-    async def test_config_defined_oauth_server_org_capped_out_when_forbidden(self):
-        """Negative: a config-defined OAuth server granted by a team whose OWN org forbids it is capped
-        out, exactly like a DB server — the cross-org protection applies to config servers too."""
+    async def test_config_oauth_server_alias_resolution_feeds_the_org_cap(self):
+        """A config-defined OAuth server granted BY ALIAS whose OWN org forbids it is capped out — AND the
+        cap is proven to run on RESOLVED server_ids, not raw strings. A control config server, granted by
+        alias and allowed by the org via its RESOLVED id, must survive: that inclusion is impossible unless
+        expand_permission_list resolved the grant alias to the id the ceiling lists, so a broken alias path
+        yields {} and FAILS this test — whereas a bare `assert empty` would pass even if resolution never
+        ran (the weakness Cursor flagged)."""
         from litellm.proxy._types import LiteLLM_ObjectPermissionTable
 
-        cfg_server = MagicMock()
-        cfg_server.server_id = "cfg-oauth-1"
-        cfg_server.alias = "linear_cfg"
-        cfg_server.server_name = "linear_cfg"
-        cfg_server.name = "linear_cfg"
+        forbidden = MagicMock()  # granted by alias, but its org forbids it → must be capped out
+        forbidden.server_id = "cfg-oauth-1"
+        forbidden.alias = forbidden.server_name = forbidden.name = "linear_cfg"
+        control = MagicMock()  # granted by alias, allowed by the org via its RESOLVED id → must survive
+        control.server_id = "control-id"
+        control.alias = control.server_name = control.name = "control_alias"
 
-        teams = {"team-b": self._team("team-b", ["linear_cfg"], org_id="org-b")}
-        # org-b's ceiling permits a DIFFERENT server only → the config server is forbidden by its own org.
+        teams = {"team-b": self._team("team-b", ["linear_cfg", "control_alias"], org_id="org-b")}
+        # org-b's ceiling allows ONLY the control server, referenced by its RESOLVED server_id.
         org_perms = {
-            "org-b": LiteLLM_ObjectPermissionTable(object_permission_id="orgop-org-b", mcp_servers=["other-srv"])
+            "org-b": LiteLLM_ObjectPermissionTable(object_permission_id="orgop-org-b", mcp_servers=["control-id"])
         }
         auth = self._admitted_subject("sso-user")
         with self._patch(
             teams_by_id=teams,
             user_teams=["team-b"],
             org_perms=org_perms,
-            registry={"cfg-oauth-1": cfg_server},
+            registry={"cfg-oauth-1": forbidden, "control-id": control},
         ):
             result = await MCPRequestHandler._get_allowed_mcp_servers_for_team(auth)
-        assert set(result) == set()  # config OAuth server capped out by its own org's ceiling
+        # control survives ('control_alias' resolved to 'control-id', matching the id-based ceiling); the
+        # forbidden config server ('cfg-oauth-1') is capped out. A broken alias path → {} → fails here.
+        assert set(result) == {"control-id"}
 
 
 @pytest.mark.asyncio
