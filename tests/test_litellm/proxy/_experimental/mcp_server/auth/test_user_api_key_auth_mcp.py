@@ -6967,3 +6967,42 @@ class TestAdmittedSubjectPerTeamOrgCap:
         with self._patch(teams_by_id=teams, user_teams=["team-a"], org_perms={"org-a": self.LOAD_FAILS}):
             result = await MCPRequestHandler._get_allowed_mcp_servers_for_team(auth)
         assert result == []  # fail closed, not {srv1, srv2}
+
+    # ---- open bot-thread findings (2026-07-21 re-review) ----
+
+    async def test_org_less_team_grant_capped_by_user_primary_org(self):
+        """HIGH (cursor): a team with NO organization_id must still be bounded by the user's PRIMARY
+        org — otherwise, since admitted subjects skip the top-level primary-org cap, an org-less team's
+        grant would bypass every org ceiling and reach servers the user's home org forbids."""
+        from litellm.proxy._types import LiteLLM_ObjectPermissionTable
+
+        teams = {"team-noorg": self._team("team-noorg", ["srv1", "srv2"], org_id=None)}
+        org_perms = {"org-U": LiteLLM_ObjectPermissionTable(object_permission_id="orgop-org-U", mcp_servers=["srv1"])}
+        auth = self._admitted_subject("sso-user", org_id="org-U")
+        with self._patch(teams_by_id=teams, user_teams=["team-noorg"], org_perms=org_perms):
+            result = await MCPRequestHandler._get_allowed_mcp_servers_for_team(auth)
+        # org-less team falls back to the user's primary org (org-U → {srv1}); srv2 capped out.
+        assert set(result) == {"srv1"}
+
+    async def test_tool_empty_contributions_fails_closed(self):
+        """MEDIUM (greptile/cursor): when no source in the tool-resolution view grants the server (a
+        TOCTOU/cache-lag inconsistency on a server that passed the server gate), the admitted path must
+        fail CLOSED (deny all tools = []), NOT allow-all (None)."""
+        teams = {"team-a": self._team("team-a", ["srv1"], org_id="org-a")}
+        auth = self._admitted_subject("sso-user")
+        with self._patch(teams_by_id=teams, user_teams=["team-a"], org_perms={"org-a": None}):
+            # 'srv-nobody' is granted by neither the team nor the user directly → empty contributions.
+            tools = await MCPRequestHandler.get_allowed_tools_for_server("srv-nobody", auth)
+        assert tools == []
+
+    async def test_tool_no_db_honors_in_memory_direct_restriction(self):
+        """MEDIUM (cursor): with no DB, the tool path must still honor the user's OWN in-memory
+        object_permission tool restriction (resolvable without a DB) rather than blanket-allow (None)."""
+        from litellm.proxy._types import LiteLLM_ObjectPermissionTable
+
+        auth = self._admitted_subject(
+            "sso-user", own_servers=["srv1"], own_tool_perms={"srv1": ["t1"]}
+        )  # no org_id, direct grant of srv1 restricted to {t1}
+        with patch("litellm.proxy.proxy_server.prisma_client", None):
+            tools = await MCPRequestHandler.get_allowed_tools_for_server("srv1", auth)
+        assert tools == ["t1"]  # in-memory restriction honored, not widened to all tools

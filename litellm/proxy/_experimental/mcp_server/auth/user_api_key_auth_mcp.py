@@ -1803,9 +1803,11 @@ class MCPRequestHandler:
             user_api_key_cache,
         )
 
-        if prisma_client is None:
-            return None
-
+        # Deliberately NO `prisma_client is None → return None` short-circuit: the user's OWN direct
+        # grant resolves from the in-memory object_permission without a DB (the team loop below no-ops
+        # when there is no DB, since _team_ids_for_mcp_grant returns []), so honoring the direct
+        # restriction here keeps the tool path from fail-opening (allow-all) when the server path would
+        # still enforce the in-memory grant.
         contributions: list[set[str] | None] = []
 
         # Team sources: each team that grants the server contributes its tool restriction, capped by
@@ -1830,7 +1832,7 @@ class MCPRequestHandler:
             )
             team_restriction = set(raw) if raw else None
             org_ceiling = await MCPRequestHandler._org_mcp_tool_ceiling(
-                team_obj.organization_id if team_obj else None, server_id
+                MCPRequestHandler._team_cap_org_id(team_obj, user_api_key_auth), server_id
             )
             contributions.append(MCPRequestHandler._tool_ceiling_intersect(team_restriction, org_ceiling))
 
@@ -1852,9 +1854,12 @@ class MCPRequestHandler:
             contributions.append(MCPRequestHandler._tool_ceiling_intersect(direct_restriction, direct_org_ceiling))
 
         if not contributions:
-            # Server reachable but no source imposed a tool restriction (e.g. granted via a bare
-            # server/access-group grant) → allow every tool.
-            return None
+            # No source in THIS function's view grants the server, yet it passed the server-level gate:
+            # a TOCTOU / cache-lag inconsistency (a grant revoked between the two checks). Fail CLOSED
+            # (deny every tool), matching the rest of the admitted path — never allow-all. A source that
+            # grants the server with NO tool restriction appends None (not nothing), so contributions is
+            # non-empty in that legitimate case and the any(c is None) guard below handles it.
+            return []
         if any(c is None for c in contributions):
             # A granting source allows every tool → the union allows every tool.
             return None
@@ -2014,13 +2019,17 @@ class MCPRequestHandler:
             servers = await MCPRequestHandler._team_granted_servers(team_obj, team_access_group_servers)
 
             # Per-team org ceiling: a keyless admitted subject unions grants across teams that may span
-            # organizations, so each team's grant must be capped by ITS OWN org — not the caller's primary
-            # org (get_allowed_mcp_servers skips the primary-org top-level cap for admitted subjects for
-            # exactly this reason). Applied at the single return point so EVERY source above — including the
-            # all_proxy sentinel expansion — is bounded. A single-team key is not an admitted subject, so its
-            # behavior is unchanged (the top-level primary-org cap still applies to it).
+            # organizations, so each team's grant is capped by ITS OWN org — or, for a team with no
+            # organization_id, by the user's PRIMARY org (see _team_cap_org_id), so an org-less team is
+            # still bounded by the user's home org rather than left unbounded (get_allowed_mcp_servers
+            # skips the primary-org top-level cap for admitted subjects, so this per-team cap is the only
+            # org bound). Applied at the single return point so EVERY source above — including the
+            # all_proxy sentinel expansion — is bounded. A single-team key is not an admitted subject, so
+            # its behavior is unchanged (the top-level primary-org cap still applies to it).
             if _is_mcp_admitted_user_subject(user_api_key_auth):
-                org_ceiling = await MCPRequestHandler._org_mcp_server_ceiling(team_obj.organization_id)
+                org_ceiling = await MCPRequestHandler._org_mcp_server_ceiling(
+                    MCPRequestHandler._team_cap_org_id(team_obj, user_api_key_auth)
+                )
                 if org_ceiling is not None:
                     servers &= org_ceiling
             return list(servers)
@@ -2174,6 +2183,19 @@ class MCPRequestHandler:
                 detail="Service Unavailable: organization MCP permission could not be loaded",
             )
         return op
+
+    @staticmethod
+    def _team_cap_org_id(team_obj: LiteLLM_TeamTable | None, user_api_key_auth: UserAPIKeyAuth | None) -> str | None:
+        """The org whose ceiling caps a team's grant for a keyless admitted subject: the team's OWN org,
+        or — for a team with no ``organization_id`` — the user's PRIMARY org. Without this fallback an
+        org-less team would be capped by no org at all (the top-level primary-org cap is skipped for
+        admitted subjects), letting the user reach servers their home org forbids via an org-less team.
+        Returns None only when neither the team nor the user has an org (then there is no org policy to
+        enforce)."""
+        team_org = getattr(team_obj, "organization_id", None) if team_obj is not None else None
+        if team_org:
+            return team_org
+        return user_api_key_auth.org_id if user_api_key_auth is not None else None
 
     @staticmethod
     async def _org_mcp_server_ceiling(org_id: str | None) -> set[str] | None:
