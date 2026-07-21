@@ -2878,6 +2878,41 @@ async def test_virtual_key_budget_check_ui_session_key_names_the_budget_knob():
 
 
 @pytest.mark.asyncio
+async def test_virtual_key_budget_check_ui_team_key_with_custom_budget_gets_no_hint():
+    """The hint asserts the budget came from max_ui_session_budget, so it must not
+    fire for a dashboard-team key whose max_budget differs from that setting."""
+    from litellm.constants import UI_SESSION_TOKEN_TEAM_ID
+    from litellm.proxy.utils import ProxyLogging
+
+    valid_token = UserAPIKeyAuth(
+        token="ui-session-token-custom-budget",
+        spend=6.0,
+        max_budget=5.0,
+        user_id="admin-user",
+        team_id=UI_SESSION_TOKEN_TEAM_ID,
+    )
+
+    proxy_logging_obj = ProxyLogging(user_api_key_cache=None)
+    proxy_logging_obj.budget_alerts = AsyncMock()
+
+    async def mock_get_current_spend(
+        counter_key, fallback_spend, max_budget=None, **kwargs
+    ):
+        return fallback_spend
+
+    with patch("litellm.proxy.proxy_server.get_current_spend", mock_get_current_spend):
+        with pytest.raises(litellm.BudgetExceededError) as exc_info:
+            await _virtual_key_max_budget_check(
+                valid_token=valid_token,
+                proxy_logging_obj=proxy_logging_obj,
+            )
+
+    message = str(exc_info.value)
+    assert "max_ui_session_budget" not in message
+    assert message.endswith("Max budget: 5.0")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("team_id", [None, "prod-team"])
 async def test_virtual_key_budget_check_non_ui_key_message_unchanged(team_id):
     """The max_ui_session_budget hint is only for dashboard session keys; a normal

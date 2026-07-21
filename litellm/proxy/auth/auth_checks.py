@@ -3573,6 +3573,7 @@ async def _virtual_key_max_budget_check(
                 " auto router Test Connection. Raise max_ui_session_budget in the proxy config, or log"
                 " out and log in again to start a new session with a fresh budget."
                 if valid_token.team_id == UI_SESSION_TOKEN_TEAM_ID
+                and valid_token.max_budget == litellm.max_ui_session_budget
                 else ""
             )
             raise litellm.BudgetExceededError(
