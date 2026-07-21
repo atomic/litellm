@@ -493,3 +493,52 @@ async def test_non_ascii_code_challenge_fails_grant_not_500():
     )
     assert response.status_code == 400
     assert json.loads(response.body)["error"] == "invalid_grant"
+
+
+@pytest.mark.asyncio
+async def test_single_use_guard_in_memory_is_single_use_within_process():
+    """No Redis configured (single-replica): the in-memory increment is authoritative — the first claim
+    wins, a replay of the same id loses."""
+    from litellm.proxy._experimental.mcp_server.gateway_dcr_flow import _SingleUseGuard
+
+    guard = _SingleUseGuard(DualCache())  # redis_cache is None
+    assert await guard.claim("jti-inmem", 60) is True
+    assert await guard.claim("jti-inmem", 60) is False  # replay of the same id
+
+
+@pytest.mark.asyncio
+async def test_single_use_guard_uses_redis_as_sole_authority_when_configured():
+    """With Redis configured it is the SOLE authority: the shared INCR result decides the claim (1 →
+    first caller, >1 → replay), and the per-worker in-memory count is never consulted."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from litellm.proxy._experimental.mcp_server.gateway_dcr_flow import _SingleUseGuard
+
+    cache = DualCache()
+    cache.redis_cache = MagicMock()
+    cache.redis_cache.async_increment = AsyncMock(return_value=1)
+    # in-memory must NOT be consulted when Redis is configured — poison it so any fallback is visible.
+    cache.async_increment_cache = AsyncMock(side_effect=AssertionError("must not fall back to in-memory"))
+
+    guard = _SingleUseGuard(cache)
+    assert await guard.claim("jti-redis", 60) is True
+    cache.redis_cache.async_increment = AsyncMock(return_value=2)
+    assert await guard.claim("jti-redis", 60) is False  # Redis says 2 → replay
+
+
+@pytest.mark.asyncio
+async def test_single_use_guard_fails_closed_when_redis_errors():
+    """A Redis fault must fail the claim CLOSED (refuse the id) rather than fall back to the per-worker
+    in-memory count — which would let each replica observe count==1 and replay the one-time id (the
+    Cursor/Veria replay-across-workers finding)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from litellm.proxy._experimental.mcp_server.gateway_dcr_flow import _SingleUseGuard
+
+    cache = DualCache()
+    cache.redis_cache = MagicMock()
+    cache.redis_cache.async_increment = AsyncMock(side_effect=ConnectionError("redis down"))
+    cache.async_increment_cache = AsyncMock(return_value=1)  # would fail OPEN if the guard fell back
+
+    guard = _SingleUseGuard(cache)
+    assert await guard.claim("jti-fault", 60) is False  # fail closed, not a fallback count of 1

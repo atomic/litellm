@@ -432,25 +432,46 @@ def _pkce_verifier_matches(code_verifier: str, code_challenge: str) -> bool:
 
 
 class _SingleUseGuard:
-    """Atomic single-use claim for a one-time id (an auth-code or connect-flow ``jti``) over
-    the injected proxy cache.
+    """Atomic single-use claim for a one-time id (an auth-code, connect-flow ``jti``, or refresh-token
+    ``jti``) over the injected proxy cache.
 
-    Uses an atomic increment rather than a get-then-set: two concurrent redemptions of the
-    same id cannot both observe "unused", because exactly one increment returns 1. With
-    Redis wired this holds across replicas (``INCR`` is atomic); single-replica it holds in
-    the in-memory cache. The id's own TTL is the outer bound. A claim is the gate, not a
-    marker to check separately, so it fails closed: if the cache cannot record the claim
-    (no backend at all) the id is refused rather than admitted. For the auth code, PKCE
-    binding is the primary defense against interception; this makes the RFC 6749 4.1.2
-    single-use property reliable on top of it."""
+    Uses an atomic increment rather than a get-then-set: two concurrent redemptions of the same id
+    cannot both observe "unused", because exactly one increment returns 1. The claim IS the gate, so it
+    fails closed. Crucially, the increment must be recorded in a backend SHARED across replicas, or the
+    single-use property is per-worker only (each replica's in-memory counter returns 1, so a captured
+    id replays through a different worker):
+
+    - When a Redis backend is configured it is the SOLE authority: the claim goes straight to Redis
+      (``INCR`` is atomic across replicas), and any Redis fault fails the claim CLOSED — it never falls
+      back to the per-worker in-memory count (``DualCache.async_increment_cache`` does fall back, which
+      is exactly the replay window this avoids).
+    - With no Redis configured (single-replica) the in-memory increment is authoritative within the one
+      process. A multi-worker deployment must run Redis for the guarantee to hold across workers.
+
+    The id's own TTL is the outer bound. For the auth code, PKCE binding is the primary defense against
+    interception; this makes the RFC 6749 4.1.2 single-use property reliable on top of it."""
 
     def __init__(self, cache: DualCache) -> None:
         self._cache = cache
 
     async def claim(self, key: str, ttl_seconds: int) -> bool:
-        """Atomically claim ``key``. ``True`` iff this caller is the first (increment to 1);
-        ``False`` on a replay (>1) or when the claim could not be recorded (fail closed)."""
-        count = await self._cache.async_increment_cache(key, 1, ttl=ttl_seconds)
+        """Atomically claim ``key``. ``True`` iff this caller is the first (increment to 1); ``False``
+        on a replay (>1) or when the claim could not be recorded in the shared backend (fail closed)."""
+        redis_cache = getattr(self._cache, "redis_cache", None)
+        if redis_cache is not None:
+            # Shared, atomic authority for multi-replica deployments. Claim ONLY against Redis and fail
+            # CLOSED on any Redis fault (async_increment re-raises) rather than fall back to the
+            # per-worker in-memory count, which would let each replica observe count==1 and replay the id.
+            try:
+                count = await redis_cache.async_increment(key, 1, ttl=ttl_seconds)
+            except Exception as e:  # noqa: BLE001  # ANY Redis fault fails the single-use claim closed
+                verbose_logger.warning(
+                    "mcp gateway single-use claim: shared cache backend unavailable, failing closed: %s", e
+                )
+                return False
+            return count == 1
+        # No shared backend configured (single-replica): the in-memory increment is authoritative.
+        count = await self._cache.async_increment_cache(key, 1, ttl=ttl_seconds, local_only=True)
         return count == 1
 
 
