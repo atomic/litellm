@@ -2008,9 +2008,12 @@ class MCPRequestHandler:
                 # team's members_with_roles no longer contains the user, so the roster is what revokes
                 # access. get_team_object loads the full row (members_with_roles is a column). Gated on
                 # the admission marker so key auth (whose single team the gate already checks) is
-                # unchanged. (Team budget/org ceiling for the union are NOT re-implemented here — that
-                # is common_checks' and the top-level primary-org cap's job; doing them per-team
-                # correctly is a dedicated grant-model change, not a per-cell patch.)
+                # unchanged. (The per-team ORG CEILING is enforced below at the single return point via
+                # _org_mcp_server_ceiling + _team_cap_org_id. Team/org BUDGET is deliberately NOT enforced
+                # per-team for the union — the exact sibling of the rate-limit deferral: a cross-team
+                # user's calls attribute to the USER, whose own budget common_checks DOES enforce, never
+                # to a specific team's shared bucket, so there is no correct per-team attribution; per-team
+                # budget for a union subject is a tracked follow-up.)
                 member_user_ids = {getattr(m, "user_id", None) for m in (team_obj.members_with_roles or [])} - {None}
                 if (
                     user_api_key_auth is None
