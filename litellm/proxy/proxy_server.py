@@ -291,6 +291,7 @@ from litellm.proxy.caching_routes import router as caching_router
 from litellm.proxy.common_request_processing import (
     ProxyBaseLLMRequestProcessing,
     _is_azure_model_router_request,
+    _should_return_raw_model_name,
     create_response,
 )
 from litellm.proxy.common_utils.callback_utils import initialize_callbacks_on_proxy
@@ -318,7 +319,10 @@ from litellm.proxy.common_utils.openai_endpoint_utils import (
 from litellm.proxy.common_utils.proxy_state import ProxyState
 from litellm.proxy.common_utils.reset_budget_job import ResetBudgetJob
 from litellm.proxy.common_utils.swagger_utils import ERROR_RESPONSES
-from litellm.proxy.common_utils.timezone_utils import get_budget_reset_time
+from litellm.proxy.common_utils.timezone_utils import (
+    get_budget_reset_settings,
+    get_budget_reset_time,
+)
 from litellm.proxy.common_utils.user_api_key_cache import (
     UserApiKeyCache,
     get_management_object_ttl,
@@ -4596,6 +4600,13 @@ class ProxyConfig:
                     litellm.json_logs = True
                     litellm._turn_on_json()
                     verbose_proxy_logger.debug(f"{blue_color_code} Enabled JSON logging via config{reset_color_code}")
+                elif key == "budget_reset_time":
+                    from litellm.proxy.common_utils.timezone_utils import (
+                        parse_budget_reset_time,
+                    )
+
+                    parse_budget_reset_time(value)
+                    setattr(litellm, key, value)
                 else:
                     verbose_proxy_logger.debug(
                         f"{blue_color_code} setting litellm.{key}={_redact_general_setting_value(key, value, is_full_admin=False)}{reset_color_code}"
@@ -7076,6 +7087,9 @@ def _restamp_streaming_chunk_model(
     fallback_was_attempted: bool = False,
     fallback_model_from_metadata: str | None = None,
 ) -> tuple[Any, bool]:
+    if _should_return_raw_model_name(request_data):
+        return chunk, model_mismatch_logged
+
     target_model = fallback_model_from_metadata if fallback_was_attempted else requested_model_from_client
     # Always return the client-requested model name (not provider-prefixed internal identifiers)
     # on streaming chunks.
@@ -7864,6 +7878,7 @@ class ProxyStartupEvent:
             budget_reset_job = ResetBudgetJob(
                 proxy_logging_obj=proxy_logging_obj,
                 prisma_client=prisma_client,
+                reset_settings=get_budget_reset_settings(),
             )
 
             scheduler.add_job(

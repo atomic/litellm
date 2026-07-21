@@ -1,14 +1,14 @@
 use std::time::Duration;
 
 use litellm_core::error::CoreError;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::common_utils::{
     has_header, messages_provider_config, string_headers, truncate_error_body,
 };
-use super::{messages, MessagesRequest};
+use super::{MessagesRequest, messages};
 
 async fn read_http_request(socket: &mut TcpStream) -> String {
     let mut request = Vec::new();
@@ -53,8 +53,8 @@ fn write_response(body: &str) -> String {
 
 #[test]
 fn provider_config_resolves_anthropic_and_azure_ai() {
-    assert!(messages_provider_config("azure_ai").is_some());
     assert!(messages_provider_config("anthropic").is_some());
+    assert!(messages_provider_config("azure_ai").is_some());
     assert!(messages_provider_config("openai").is_none());
 }
 

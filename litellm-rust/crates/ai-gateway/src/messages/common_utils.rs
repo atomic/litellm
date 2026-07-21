@@ -1,8 +1,8 @@
-use litellm_core::error::{json_type_name, CoreError};
+use litellm_core::CoreResult;
+use litellm_core::error::{CoreError, json_type_name};
 use litellm_core::messages::transformation::AnthropicMessagesProviderConfig;
 use litellm_core::providers::anthropic::messages::transformation::ANTHROPIC_MESSAGES_CONFIG;
 use litellm_core::providers::azure_ai::messages::transformation::AZURE_ANTHROPIC_MESSAGES_CONFIG;
-use litellm_core::CoreResult;
 use serde_json::{Map, Value};
 
 use crate::constants::MESSAGES_ERROR_BODY_MAX_CHARS;
@@ -19,8 +19,8 @@ pub(super) fn messages_provider_config(
     provider: &str,
 ) -> Option<&'static dyn AnthropicMessagesProviderConfig> {
     match provider {
-        "azure_ai" => Some(&AZURE_ANTHROPIC_MESSAGES_CONFIG),
         "anthropic" => Some(&ANTHROPIC_MESSAGES_CONFIG),
+        "azure_ai" => Some(&AZURE_ANTHROPIC_MESSAGES_CONFIG),
         _ => None,
     }
 }
