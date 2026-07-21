@@ -3567,13 +3567,13 @@ async def _virtual_key_max_budget_check(
             key_label = valid_token.key_alias or "key"
             key_descriptor = f"{key_label} ({valid_token.key_name})" if valid_token.key_name else key_label
             ui_session_hint = (
-                ". This is a LiteLLM dashboard session key; its max_budget is set by"
-                " litellm_settings.max_ui_session_budget (default 0.25 USD) and caps LLM calls made from"
-                " the dashboard for the lifetime of the login session, such as the playground and the"
-                " auto router Test Connection. Raise max_ui_session_budget in the proxy config, or log"
-                " out and log in again to start a new session with a fresh budget."
+                ". This is a LiteLLM dashboard session key. Dashboard sessions are created with"
+                " max_budget set from litellm_settings.max_ui_session_budget (default 0.25 USD), which"
+                " caps LLM calls made from the dashboard, such as the playground and the auto router"
+                " Test Connection. Raise max_ui_session_budget in the proxy config if needed, then log"
+                " out and log in again; a new session starts with the currently configured budget and"
+                " a fresh spend of 0."
                 if valid_token.team_id == UI_SESSION_TOKEN_TEAM_ID
-                and valid_token.max_budget == litellm.max_ui_session_budget
                 else ""
             )
             raise litellm.BudgetExceededError(

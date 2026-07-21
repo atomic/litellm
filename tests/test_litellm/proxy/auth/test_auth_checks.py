@@ -2878,19 +2878,22 @@ async def test_virtual_key_budget_check_ui_session_key_names_the_budget_knob():
 
 
 @pytest.mark.asyncio
-async def test_virtual_key_budget_check_ui_team_key_with_custom_budget_gets_no_hint():
-    """The hint asserts the budget came from max_ui_session_budget, so it must not
-    fire for a dashboard-team key whose max_budget differs from that setting."""
+async def test_virtual_key_budget_check_ui_session_key_minted_under_old_setting_still_hinted():
+    """A session minted before max_ui_session_budget was raised keeps its stored
+    budget, and the hint (whose relogin remedy is exactly what fixes it) must still
+    fire; the hint only states facts that hold for every dashboard session key, so
+    it must not compare the stored budget to the current setting."""
     from litellm.constants import UI_SESSION_TOKEN_TEAM_ID
     from litellm.proxy.utils import ProxyLogging
 
     valid_token = UserAPIKeyAuth(
-        token="ui-session-token-custom-budget",
+        token="ui-session-token-old-setting",
         spend=6.0,
         max_budget=5.0,
         user_id="admin-user",
         team_id=UI_SESSION_TOKEN_TEAM_ID,
     )
+    assert valid_token.max_budget != litellm.max_ui_session_budget
 
     proxy_logging_obj = ProxyLogging(user_api_key_cache=None)
     proxy_logging_obj.budget_alerts = AsyncMock()
@@ -2908,8 +2911,8 @@ async def test_virtual_key_budget_check_ui_team_key_with_custom_budget_gets_no_h
             )
 
     message = str(exc_info.value)
-    assert "max_ui_session_budget" not in message
-    assert message.endswith("Max budget: 5.0")
+    assert "max_ui_session_budget" in message
+    assert "log out and log in again" in message
 
 
 @pytest.mark.asyncio
