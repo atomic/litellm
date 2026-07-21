@@ -6808,9 +6808,10 @@ class TestAdmittedSubjectPerTeamOrgCap:
                 global_mcp_server_manager,
             )
 
-            cms.append(
-                patch.object(global_mcp_server_manager, "get_registry", return_value={s: MagicMock() for s in registry})
-            )
+            # registry may be a list of bare server_ids (MagicMock servers) OR a dict of
+            # {server_id: server_obj} for tests that need real alias/name resolution (config servers).
+            reg = registry if isinstance(registry, dict) else {s: MagicMock() for s in registry}
+            cms.append(patch.object(global_mcp_server_manager, "get_registry", return_value=reg))
         with contextlib.ExitStack() as es:
             for cm in cms:
                 es.enter_context(cm)
@@ -7006,6 +7007,66 @@ class TestAdmittedSubjectPerTeamOrgCap:
         with patch("litellm.proxy.proxy_server.prisma_client", None):
             tools = await MCPRequestHandler.get_allowed_tools_for_server("srv1", auth)
         assert tools == ["t1"]  # in-memory restriction honored, not widened to all tools
+
+    # ---- config.yaml-defined servers (incl. OAuth) ----
+
+    async def test_config_defined_oauth_server_by_alias_reached_and_org_capped(self):
+        """A config.yaml-defined MCP OAuth server flows through the SAME resolution as a DB server:
+        the team grant (and the org ceiling) reference it by ALIAS, expand_permission_list resolves it
+        via the config+DB registry union to its server_id, and the per-team org cap applies identically.
+        (The config server's OAuth *client* persistence is #33768 — an orthogonal egress concern; this
+        pins the grant/reachability side of the 10x flow for config-defined servers.)"""
+        from litellm.proxy._types import LiteLLM_ObjectPermissionTable
+
+        cfg_server = MagicMock()
+        cfg_server.server_id = "cfg-oauth-1"
+        cfg_server.alias = "linear_cfg"
+        cfg_server.server_name = "linear_cfg"
+        cfg_server.name = "linear_cfg"
+
+        # team grants the config server BY ALIAS alongside a DB-style bare id; org-a's ceiling lists
+        # ONLY the config server (also by alias).
+        teams = {"team-a": self._team("team-a", ["linear_cfg", "srv-db"], org_id="org-a")}
+        org_perms = {
+            "org-a": LiteLLM_ObjectPermissionTable(object_permission_id="orgop-org-a", mcp_servers=["linear_cfg"])
+        }
+        auth = self._admitted_subject("sso-user")
+        with self._patch(
+            teams_by_id=teams,
+            user_teams=["team-a"],
+            org_perms=org_perms,
+            registry={"cfg-oauth-1": cfg_server},
+        ):
+            result = await MCPRequestHandler._get_allowed_mcp_servers_for_team(auth)
+        # 'linear_cfg' alias resolves to the config server_id and survives org-a's ceiling; 'srv-db'
+        # (not in org-a's allowlist) is capped out — same per-team org cap, config server included.
+        assert set(result) == {"cfg-oauth-1"}
+
+    async def test_config_defined_oauth_server_org_capped_out_when_forbidden(self):
+        """Negative: a config-defined OAuth server granted by a team whose OWN org forbids it is capped
+        out, exactly like a DB server — the cross-org protection applies to config servers too."""
+        from litellm.proxy._types import LiteLLM_ObjectPermissionTable
+
+        cfg_server = MagicMock()
+        cfg_server.server_id = "cfg-oauth-1"
+        cfg_server.alias = "linear_cfg"
+        cfg_server.server_name = "linear_cfg"
+        cfg_server.name = "linear_cfg"
+
+        teams = {"team-b": self._team("team-b", ["linear_cfg"], org_id="org-b")}
+        # org-b's ceiling permits a DIFFERENT server only → the config server is forbidden by its own org.
+        org_perms = {
+            "org-b": LiteLLM_ObjectPermissionTable(object_permission_id="orgop-org-b", mcp_servers=["other-srv"])
+        }
+        auth = self._admitted_subject("sso-user")
+        with self._patch(
+            teams_by_id=teams,
+            user_teams=["team-b"],
+            org_perms=org_perms,
+            registry={"cfg-oauth-1": cfg_server},
+        ):
+            result = await MCPRequestHandler._get_allowed_mcp_servers_for_team(auth)
+        assert set(result) == set()  # config OAuth server capped out by its own org's ceiling
 
 
 @pytest.mark.asyncio
