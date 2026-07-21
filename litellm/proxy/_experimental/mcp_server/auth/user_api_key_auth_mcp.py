@@ -433,25 +433,25 @@ class MCPRequestHandler:
                 )
 
         # Leak-defense (single chokepoint): a gateway admission credential — the session bearer or the
-        # bridge envelope — is NEVER a valid upstream MCP token. Scrub it from every egress header
-        # context so no client-forwarded, OBO-subject, or passthrough path can send it upstream, where a
-        # hostile server could capture and replay it against the aggregate endpoint as this user.
-        #
-        # Anchored to the CREDENTIAL SHAPE, not just the admission arm: a keyless-admitted subject is
-        # scrubbed (marker set), AND so is any session-/envelope-shaped Authorization that reached a
-        # per-server scope WITHOUT being admitted — e.g. a session bearer misdirected to a
-        # true_passthrough `/mcp/<server>` path, which enters the anonymous passthrough arm (no marker)
-        # and would otherwise forward the caller's Authorization verbatim to the upstream. A legitimate
-        # passthrough/upstream token is never session- or envelope-shaped, so it is unaffected; per-server
-        # vaulted credentials (resolved at egress) are unaffected.
+        # bridge envelope — is NEVER a valid upstream MCP token. Scrub it from EVERY egress header context
+        # (top-level Authorization, the deprecated `x-mcp-auth`, and per-server `x-mcp-{alias}-authorization`)
+        # so no client-forwarded, OBO-subject, or passthrough path can send it upstream, where a hostile
+        # server could capture and replay it against the aggregate endpoint as this user. Anchored to the
+        # credential SHAPE, so a legitimate upstream/passthrough token (never session- or envelope-shaped)
+        # is forwarded unchanged; per-server vaulted credentials (resolved at egress) are unaffected.
         raw_headers = dict(headers)
-        caller_authorization = oauth2_headers.get("Authorization") if oauth2_headers else None
-        is_gateway_admission_credential = caller_authorization is not None and (
-            is_session_bearer_shaped(caller_authorization) or is_bridge_envelope_shaped(caller_authorization)
+        (
+            oauth2_headers,
+            raw_headers,
+            mcp_auth_header,
+            mcp_server_auth_headers,
+        ) = MCPRequestHandler._scrub_gateway_admission_credentials(
+            admitted=_is_mcp_admitted_user_subject(validated_user_api_key_auth),
+            oauth2_headers=oauth2_headers,
+            raw_headers=raw_headers,
+            mcp_auth_header=mcp_auth_header,
+            mcp_server_auth_headers=mcp_server_auth_headers,
         )
-        if _is_mcp_admitted_user_subject(validated_user_api_key_auth) or is_gateway_admission_credential:
-            oauth2_headers = None
-            raw_headers = {k: v for k, v in raw_headers.items() if k.lower() != "authorization"}
 
         return (
             validated_user_api_key_auth,
@@ -461,6 +461,57 @@ class MCPRequestHandler:
             oauth2_headers,
             raw_headers,
         )
+
+    @staticmethod
+    def _is_gateway_admission_credential(value: str | None) -> bool:
+        """True when a header value is a gateway admission credential — a session bearer (``llm_session_`` /
+        ``llm_srefresh_``) or a bridge envelope. Such a value proves who signed in to the GATEWAY; it is
+        never a valid credential for an UPSTREAM MCP server, so it must never be forwarded, where a hostile
+        upstream could capture and replay it against the aggregate ``/mcp`` endpoint as this user."""
+        return value is not None and (is_session_bearer_shaped(value) or is_bridge_envelope_shaped(value))
+
+    @staticmethod
+    def _scrub_gateway_admission_credentials(
+        admitted: bool,
+        oauth2_headers: dict[str, str] | None,
+        raw_headers: dict[str, str],
+        mcp_auth_header: str | None,
+        mcp_server_auth_headers: dict[str, dict[str, str]] | None,
+    ) -> tuple[dict[str, str] | None, dict[str, str], str | None, dict[str, dict[str, str]] | None]:
+        """Remove any gateway admission credential from EVERY egress header context, keyed on the credential
+        SHAPE: the top-level ``Authorization`` (``oauth2_headers`` + ``raw_headers``), the deprecated
+        ``x-mcp-auth`` (``mcp_auth_header``), and per-server ``x-mcp-{alias}-authorization``
+        (``mcp_server_auth_headers``). A legitimate upstream/passthrough token is never session- or
+        envelope-shaped, so it is forwarded unchanged; the per-server token the bridge arm injects is the
+        real upstream credential (also not gateway-shaped), so it survives. An admitted subject's top-level
+        Authorization IS the admission bearer, so it is dropped unconditionally as defense-in-depth even
+        though it is already gateway-shaped."""
+        cred = MCPRequestHandler._is_gateway_admission_credential
+
+        # 1. Top-level Authorization → oauth2_headers.
+        authz = oauth2_headers.get("Authorization") if oauth2_headers else None
+        if admitted or cred(authz):
+            oauth2_headers = None
+
+        # 2. raw_headers: drop the admitted subject's Authorization, and ANY header whose value is a
+        #    gateway credential (covers x-mcp-auth and x-mcp-{alias}-authorization in their raw form).
+        raw_headers = {
+            k: v for k, v in raw_headers.items() if not ((admitted and k.lower() == "authorization") or cred(v))
+        }
+
+        # 3. Deprecated x-mcp-auth value.
+        if cred(mcp_auth_header):
+            mcp_auth_header = None
+
+        # 4. Per-server x-mcp-{alias}-authorization values (drop the value, then any now-empty server dict).
+        if mcp_server_auth_headers:
+            stripped = {
+                alias: {h: val for h, val in hdrs.items() if not cred(val)}
+                for alias, hdrs in mcp_server_auth_headers.items()
+            }
+            mcp_server_auth_headers = {alias: hdrs for alias, hdrs in stripped.items() if hdrs}
+
+        return oauth2_headers, raw_headers, mcp_auth_header, mcp_server_auth_headers
 
     @staticmethod
     def _extract_target_server_names_from_path(path: str) -> List[str]:

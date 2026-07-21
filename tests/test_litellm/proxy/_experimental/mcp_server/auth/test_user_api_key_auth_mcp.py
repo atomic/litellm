@@ -7135,3 +7135,54 @@ class TestSessionBearerEgressScrub:
             (_auth, _mah, _srv, _sah, oauth2_headers, _raw) = await MCPRequestHandler.process_mcp_request(scope)
 
         assert oauth2_headers.get("Authorization") == "Bearer real-upstream-opaque-token-xyz"
+
+    async def test_scrub_removes_gateway_credential_from_every_egress_context(self):
+        """The scrub is anchored to the credential SHAPE and covers ALL egress contexts, not just
+        Authorization: a session bearer placed in x-mcp-auth OR a per-server x-mcp-{alias}-authorization
+        header is stripped too (the High-severity gap: those were forwarded upstream before)."""
+        sess = "Bearer llm_session_abc"
+        oauth2, raw, mcp_auth, per_server = MCPRequestHandler._scrub_gateway_admission_credentials(
+            admitted=False,
+            oauth2_headers={"Authorization": sess},
+            raw_headers={
+                "authorization": sess,
+                "x-mcp-auth": "llm_session_xyz",
+                "x-mcp-github-authorization": "llm_session_ghi",
+            },
+            mcp_auth_header="llm_session_xyz",
+            mcp_server_auth_headers={"github": {"Authorization": "llm_session_ghi"}},
+        )
+        assert oauth2 is None
+        assert "authorization" not in {k.lower() for k in raw}
+        assert all("llm_session_" not in v for v in raw.values())  # x-mcp-auth + per-server raw values gone
+        assert mcp_auth is None  # deprecated x-mcp-auth value scrubbed
+        assert per_server == {}  # per-server session bearer removed → now-empty server dict dropped
+
+    async def test_scrub_keeps_real_upstream_tokens(self):
+        """A legitimate upstream token is never session-/envelope-shaped, so every context is forwarded
+        unchanged — guards against over-stripping a real credential the caller meant for the upstream."""
+        oauth2, raw, mcp_auth, per_server = MCPRequestHandler._scrub_gateway_admission_credentials(
+            admitted=False,
+            oauth2_headers={"Authorization": "Bearer real-upstream-xyz"},
+            raw_headers={"authorization": "Bearer real-upstream-xyz", "x-mcp-github-authorization": "Bearer gh_real"},
+            mcp_auth_header="some-api-key-123",
+            mcp_server_auth_headers={"github": {"Authorization": "Bearer gh_real"}},
+        )
+        assert oauth2 == {"Authorization": "Bearer real-upstream-xyz"}
+        assert raw["authorization"] == "Bearer real-upstream-xyz"
+        assert mcp_auth == "some-api-key-123"
+        assert per_server == {"github": {"Authorization": "Bearer gh_real"}}
+
+    async def test_scrub_admitted_drops_authorization_but_keeps_injected_upstream_token(self):
+        """An admitted subject's top-level Authorization is dropped unconditionally, while the real
+        upstream token the bridge arm INJECTS into a per-server header (not gateway-shaped) survives."""
+        oauth2, raw, mcp_auth, per_server = MCPRequestHandler._scrub_gateway_admission_credentials(
+            admitted=True,
+            oauth2_headers={"Authorization": "Bearer llm_session_abc"},
+            raw_headers={"authorization": "Bearer llm_session_abc"},
+            mcp_auth_header=None,
+            mcp_server_auth_headers={"github": {"Authorization": "Bearer gh_injected_upstream"}},
+        )
+        assert oauth2 is None
+        assert "authorization" not in {k.lower() for k in raw}
+        assert per_server == {"github": {"Authorization": "Bearer gh_injected_upstream"}}
