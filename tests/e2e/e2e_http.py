@@ -286,6 +286,26 @@ def patch[R: BaseModel](
     return _classify(resp, response_type)
 
 
+def put[R: BaseModel](
+    url: URL,
+    *,
+    headers: BaseModel,
+    json: BaseModel,
+    response_type: type[R],
+    timeout: float = 30.0,
+) -> Result[R]:
+    try:
+        resp = requests.put(
+            str(url),
+            headers=_headers(headers),
+            json=json.model_dump(by_alias=True, exclude_none=True),
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        return NetworkError(message=str(exc))
+    return _classify(resp, response_type)
+
+
 def probe(
     url: URL, *, headers: BaseModel, params: BaseModel, timeout: float = 30.0
 ) -> ProbeResult:
