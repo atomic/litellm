@@ -966,13 +966,28 @@ async def google_login(
         os.getenv("LITELLM_HIDE_DEFAULT_CREDENTIALS_HINT", "false").lower() == "true"
         or general_settings.get("hide_default_credentials_hint", False) is True
     )
-    return HTMLResponse(
+    form_response = HTMLResponse(
         content=build_ui_login_form(
             show_deprecation_banner=True,
             hide_default_credentials_hint=hide_default_credentials_hint,
         ),
         status_code=200,
     )
+    # Preserve a same-origin return_to (e.g. the aggregate DCR authorize round-trip) across the
+    # username/password sign-in too. The SSO branch above sets this cookie on its redirect; without it
+    # here, /login has nothing to resume to and the connect flow dead-ends at the dashboard. Same
+    # validation as the SSO branch, so it can never be an open redirect.
+    if return_to is not None and (
+        _is_same_origin_return_path(return_to) or SSOAuthenticationHandler._validate_return_to(return_to)
+    ):
+        form_response.set_cookie(
+            key="litellm_cp_return_to",
+            value=return_to,
+            max_age=600,
+            httponly=True,
+            samesite="lax",
+        )
+    return form_response
 
 
 def generic_response_convertor(

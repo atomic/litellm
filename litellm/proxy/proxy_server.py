@@ -13426,9 +13426,22 @@ async def login(request: Request):
         litellm_dashboard_ui += "/ui/"
     litellm_dashboard_ui += "?login=success"
 
+    # Honor a same-origin return_to preserved by the sign-in page (e.g. the aggregate DCR connect flow's
+    # authorize round-trip), mirroring the SSO callback; otherwise land on the dashboard. Gated by
+    # _is_same_origin_return_path (strictly relative path) so it can never be an open redirect, and the
+    # one-shot cookie is cleared after use.
+    from litellm.proxy.management_endpoints.ui_sso import _is_same_origin_return_path
+
+    cp_return_to = request.cookies.get("litellm_cp_return_to")
+    redirect_target = litellm_dashboard_ui
+    if cp_return_to and _is_same_origin_return_path(cp_return_to):
+        redirect_target = cp_return_to
+
     # Create redirect response with cookie
-    redirect_response = RedirectResponse(url=litellm_dashboard_ui, status_code=303)
+    redirect_response = RedirectResponse(url=redirect_target, status_code=303)
     redirect_response.set_cookie(key="token", value=jwt_token)
+    if cp_return_to:
+        redirect_response.delete_cookie(key="litellm_cp_return_to")
     return redirect_response
 
 
