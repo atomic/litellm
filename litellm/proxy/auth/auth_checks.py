@@ -28,6 +28,7 @@ from litellm.constants import (
     DEFAULT_IN_MEMORY_TTL,
     DEFAULT_MAX_RECURSE_DEPTH,
     EMAIL_BUDGET_ALERT_MAX_SPEND_ALERT_PERCENTAGE,
+    UI_SESSION_TOKEN_TEAM_ID,
 )
 from litellm.litellm_core_utils.dd_tracing import tracer
 from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
@@ -3565,10 +3566,19 @@ async def _virtual_key_max_budget_check(
             # spend back to a key; key_name is the masked form (last 4 chars)
             key_label = valid_token.key_alias or "key"
             key_descriptor = f"{key_label} ({valid_token.key_name})" if valid_token.key_name else key_label
+            ui_session_hint = (
+                ". This is a LiteLLM dashboard session key; its max_budget is set by"
+                " litellm_settings.max_ui_session_budget (default 0.25 USD) and caps LLM calls made from"
+                " the dashboard for the lifetime of the login session, such as the playground and the"
+                " auto router Test Connection. Raise max_ui_session_budget in the proxy config, or log"
+                " out and log in again to start a new session with a fresh budget."
+                if valid_token.team_id == UI_SESSION_TOKEN_TEAM_ID
+                else ""
+            )
             raise litellm.BudgetExceededError(
                 current_cost=spend,
                 max_budget=valid_token.max_budget,
-                message=f"Budget has been exceeded! Key={key_descriptor} Current cost: {spend}, Max budget: {valid_token.max_budget}",
+                message=f"Budget has been exceeded! Key={key_descriptor} Current cost: {spend}, Max budget: {valid_token.max_budget}{ui_session_hint}",
                 entity_type=Litellm_EntityType.KEY.value,
                 entity_id=valid_token.token,
             )

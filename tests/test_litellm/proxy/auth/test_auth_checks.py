@@ -2839,6 +2839,79 @@ async def test_virtual_key_budget_check_fallback_no_counter():
         assert exc_info.value.current_cost == 15.0
 
 
+@pytest.mark.asyncio
+async def test_virtual_key_budget_check_ui_session_key_names_the_budget_knob():
+    """LIT-4662 regression: an over-budget dashboard session key must explain that
+    its budget comes from litellm_settings.max_ui_session_budget (default 0.25) and
+    how to recover; otherwise the 0.25 looks like an unconfigurable hardcoded cap."""
+    from litellm.constants import UI_SESSION_TOKEN_TEAM_ID
+    from litellm.proxy.utils import ProxyLogging
+
+    valid_token = UserAPIKeyAuth(
+        token="ui-session-token",
+        spend=0.323737,
+        max_budget=0.25,
+        user_id="admin-user",
+        team_id=UI_SESSION_TOKEN_TEAM_ID,
+    )
+
+    proxy_logging_obj = ProxyLogging(user_api_key_cache=None)
+    proxy_logging_obj.budget_alerts = AsyncMock()
+
+    async def mock_get_current_spend(
+        counter_key, fallback_spend, max_budget=None, **kwargs
+    ):
+        return fallback_spend
+
+    with patch("litellm.proxy.proxy_server.get_current_spend", mock_get_current_spend):
+        with pytest.raises(litellm.BudgetExceededError) as exc_info:
+            await _virtual_key_max_budget_check(
+                valid_token=valid_token,
+                proxy_logging_obj=proxy_logging_obj,
+            )
+
+    message = str(exc_info.value)
+    assert "Budget has been exceeded!" in message
+    assert "Current cost: 0.323737, Max budget: 0.25" in message
+    assert "max_ui_session_budget" in message
+    assert "log out and log in again" in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("team_id", [None, "prod-team"])
+async def test_virtual_key_budget_check_non_ui_key_message_unchanged(team_id):
+    """The max_ui_session_budget hint is only for dashboard session keys; a normal
+    key's budget error must stay byte-identical to the pre-LIT-4662 message."""
+    from litellm.proxy.utils import ProxyLogging
+
+    valid_token = UserAPIKeyAuth(
+        token="customer-token",
+        spend=15.0,
+        max_budget=10.0,
+        user_id="test-user",
+        team_id=team_id,
+    )
+
+    proxy_logging_obj = ProxyLogging(user_api_key_cache=None)
+    proxy_logging_obj.budget_alerts = AsyncMock()
+
+    async def mock_get_current_spend(
+        counter_key, fallback_spend, max_budget=None, **kwargs
+    ):
+        return fallback_spend
+
+    with patch("litellm.proxy.proxy_server.get_current_spend", mock_get_current_spend):
+        with pytest.raises(litellm.BudgetExceededError) as exc_info:
+            await _virtual_key_max_budget_check(
+                valid_token=valid_token,
+                proxy_logging_obj=proxy_logging_obj,
+            )
+
+    message = str(exc_info.value)
+    assert "max_ui_session_budget" not in message
+    assert message.endswith("Max budget: 10.0")
+
+
 # =====================================================================
 # Throttle-on-budget-exceeded tests (LIT-3894): an over-budget key that
 # opted in is throttled to a global % of its TPM/RPM instead of blocked.
