@@ -7006,3 +7006,64 @@ class TestAdmittedSubjectPerTeamOrgCap:
         with patch("litellm.proxy.proxy_server.prisma_client", None):
             tools = await MCPRequestHandler.get_allowed_tools_for_server("srv1", auth)
         assert tools == ["t1"]  # in-memory restriction honored, not widened to all tools
+
+
+@pytest.mark.asyncio
+class TestSessionBearerEgressScrub:
+    """The gateway session bearer / bridge envelope is an admission credential, never an upstream token.
+    The leak-defense scrub is anchored to the credential SHAPE, so a session-shaped Authorization is
+    stripped from every egress context even when it reaches a non-aggregate scope that never set the
+    admission marker (design-review finding: a session bearer misdirected to a per-server true_passthrough
+    path would otherwise be forwarded upstream verbatim and replayed against the aggregate endpoint)."""
+
+    async def test_session_bearer_misdirected_to_passthrough_is_scrubbed(self):
+        from litellm.types.mcp import MCPAuth
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/mcp/passthrough_server",
+            "headers": [(b"authorization", b"Bearer llm_session_synthetic-shaped-token")],
+        }
+        ttp_server = MagicMock()
+        ttp_server.auth_type = MCPAuth.true_passthrough
+
+        with (
+            patch(
+                "litellm.proxy._experimental.mcp_server.auth.user_api_key_auth_mcp.user_api_key_auth",
+                new_callable=AsyncMock,
+            ) as mock_auth,
+            patch("litellm.proxy._experimental.mcp_server.mcp_server_manager.global_mcp_server_manager") as mock_mgr,
+        ):
+            mock_mgr.get_mcp_server_by_name.return_value = ttp_server
+            (_auth, _mah, _srv, _sah, oauth2_headers, raw_headers) = await MCPRequestHandler.process_mcp_request(scope)
+
+        mock_auth.assert_not_called()  # true_passthrough → LiteLLM auth skipped (anonymous arm, no marker)
+        assert oauth2_headers is None  # session-shaped bearer scrubbed from oauth2 egress
+        assert all(k.lower() != "authorization" for k in raw_headers)  # ...and from raw egress headers
+
+    async def test_legitimate_upstream_token_is_not_scrubbed(self):
+        """A genuine upstream/passthrough token is never session- or envelope-shaped, so the shape-anchored
+        scrub must leave it intact for forwarding (guards against over-stripping)."""
+        from litellm.types.mcp import MCPAuth
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/mcp/passthrough_server",
+            "headers": [(b"authorization", b"Bearer real-upstream-opaque-token-xyz")],
+        }
+        ttp_server = MagicMock()
+        ttp_server.auth_type = MCPAuth.true_passthrough
+
+        with (
+            patch(
+                "litellm.proxy._experimental.mcp_server.auth.user_api_key_auth_mcp.user_api_key_auth",
+                new_callable=AsyncMock,
+            ),
+            patch("litellm.proxy._experimental.mcp_server.mcp_server_manager.global_mcp_server_manager") as mock_mgr,
+        ):
+            mock_mgr.get_mcp_server_by_name.return_value = ttp_server
+            (_auth, _mah, _srv, _sah, oauth2_headers, _raw) = await MCPRequestHandler.process_mcp_request(scope)
+
+        assert oauth2_headers.get("Authorization") == "Bearer real-upstream-opaque-token-xyz"

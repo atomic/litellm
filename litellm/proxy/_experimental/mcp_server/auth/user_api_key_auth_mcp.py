@@ -432,14 +432,24 @@ class MCPRequestHandler:
                     bearer_presented=False,
                 )
 
-        # Leak-defense (single chokepoint): a keyless-admitted litellm subject's Authorization is
-        # the gateway session bearer / bridge envelope, an admission credential, NOT an upstream
-        # token. Scrub it from every egress header context so no client-forwarded, OBO-subject, or
-        # passthrough path can send it upstream, where a hostile server could capture and replay it
-        # against the aggregate endpoint as this user. Per-server credentials are unaffected: they
-        # are vaulted per-user and resolved at egress, never carried on the caller header.
+        # Leak-defense (single chokepoint): a gateway admission credential — the session bearer or the
+        # bridge envelope — is NEVER a valid upstream MCP token. Scrub it from every egress header
+        # context so no client-forwarded, OBO-subject, or passthrough path can send it upstream, where a
+        # hostile server could capture and replay it against the aggregate endpoint as this user.
+        #
+        # Anchored to the CREDENTIAL SHAPE, not just the admission arm: a keyless-admitted subject is
+        # scrubbed (marker set), AND so is any session-/envelope-shaped Authorization that reached a
+        # per-server scope WITHOUT being admitted — e.g. a session bearer misdirected to a
+        # true_passthrough `/mcp/<server>` path, which enters the anonymous passthrough arm (no marker)
+        # and would otherwise forward the caller's Authorization verbatim to the upstream. A legitimate
+        # passthrough/upstream token is never session- or envelope-shaped, so it is unaffected; per-server
+        # vaulted credentials (resolved at egress) are unaffected.
         raw_headers = dict(headers)
-        if _is_mcp_admitted_user_subject(validated_user_api_key_auth):
+        caller_authorization = oauth2_headers.get("Authorization") if oauth2_headers else None
+        is_gateway_admission_credential = caller_authorization is not None and (
+            is_session_bearer_shaped(caller_authorization) or is_bridge_envelope_shaped(caller_authorization)
+        )
+        if _is_mcp_admitted_user_subject(validated_user_api_key_auth) or is_gateway_admission_credential:
             oauth2_headers = None
             raw_headers = {k: v for k, v in raw_headers.items() if k.lower() != "authorization"}
 
